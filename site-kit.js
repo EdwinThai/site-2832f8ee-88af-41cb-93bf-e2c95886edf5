@@ -2319,6 +2319,102 @@
     }
 
     // ---- step: contact details ----
+    /**
+     * Inspirationsbilder (2026-11-23, Edwin: "de ska kunna skicka in inspobild också, men det måste vara en begränsning.
+     * de ska inte kunna skicka videor"): up to PHOTO_MAX photos with the booking. The picker offers only pictures; each
+     * one is drawn again here as a JPEG of at most 1600 px (a few hundred kB instead of a phone's 3 to 10 MB, and
+     * without what the phone wrote into the file, such as where it was taken). A video, a document or a picture the
+     * browser can't open is turned away here; the server checks it all again (config/bookingPhotos.ts).
+     */
+    var PHOTO_MAX = 3, PHOTO_OUT_MAX = 1000000;
+    function photoFromFile(file) {
+      return new Promise(function (resolve, reject) {
+        var type = file.type || "";
+        if (/^video\//i.test(type)) return reject("Videor går inte att skicka, bara bilder.");
+        if (type && !/^image\//i.test(type)) return reject("Bara bilder går att skicka med.");
+        if (file.size > 40 * 1024 * 1024) return reject("Bilden är för stor. Välj en annan bild.");
+        var src = URL.createObjectURL(file), img = new Image();
+        img.onload = function () {
+          URL.revokeObjectURL(src);
+          var w = img.naturalWidth, h = img.naturalHeight;
+          if (!w || !h) return reject("Bilden kunde inte läsas. Välj en annan bild.");
+          // smaller and a little more compressed until it is under PHOTO_OUT_MAX (a busy 1600 px photo seldom needs it)
+          var tries = [[1600, 0.82], [1280, 0.75], [1000, 0.7]];
+          for (var i = 0; i < tries.length; i++) {
+            var k = Math.min(1, tries[i][0] / Math.max(w, h)), c = document.createElement("canvas");
+            c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+            var ctx = c.getContext("2d");
+            ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height); // a see-through PNG gets white, not black
+            ctx.drawImage(img, 0, 0, c.width, c.height);
+            var url = c.toDataURL("image/jpeg", tries[i][1]), b64 = url.slice(url.indexOf(",") + 1);
+            if (url.indexOf("data:image/jpeg") !== 0) return reject("Bilden kunde inte läsas. Välj en annan bild.");
+            if (b64.length * 0.75 <= PHOTO_OUT_MAX) return resolve({ b64: b64, url: url });
+          }
+          reject("Bilden är för stor. Välj en annan bild.");
+        };
+        img.onerror = function () { URL.revokeObjectURL(src); reject("Bilden kunde inte läsas. Välj en vanlig bild, till exempel JPG eller PNG."); };
+        img.src = src;
+      });
+    }
+    /** "+ Lägg till inspirationsbild", then the photos as small squares with a cross each, and a square to add one more. */
+    function photoPicker() {
+      var wrap = mk("div", "bf-photos");
+      var input = mk("input");
+      input.type = "file"; input.accept = "image/*"; input.multiple = true; input.hidden = true; input.tabIndex = -1;
+      input.setAttribute("aria-hidden", "true");
+      var open = mk("button", "bf-photo-open", "+ Lägg till inspirationsbild");
+      open.type = "button";
+      var label = mk("p", "bf-photo-label");
+      var row = mk("div", "bf-photo-row");
+      var hint = mk("p", "bf-photo-hint", "Högst " + PHOTO_MAX + " bilder, inga videor. Bara salongen ser dem.");
+      var perr = mk("p", "bf-photo-err");
+      perr.setAttribute("role", "alert");
+      var busy = false;
+      function pick() { if (!busy && state.photos.length < PHOTO_MAX) { perr.textContent = ""; perr.hidden = true; input.click(); } }
+      function draw() {
+        var n = state.photos.length;
+        open.hidden = n > 0 || busy;
+        row.hidden = hint.hidden = label.hidden = n === 0 && !busy;
+        label.textContent = n > 1 ? "Inspirationsbilder" : "Inspirationsbild";
+        perr.hidden = !perr.textContent;
+        row.innerHTML = "";
+        state.photos.forEach(function (p, i) {
+          var tile = mk("div", "bf-photo");
+          var im = mk("img"); im.src = p.url; im.alt = "Inspirationsbild " + (i + 1);
+          var x = mk("button", "bf-photo-x", "×");
+          x.type = "button"; x.setAttribute("aria-label", "Ta bort bild " + (i + 1));
+          x.addEventListener("click", function () { state.photos.splice(i, 1); perr.textContent = ""; draw(); (row.querySelector(".bf-photo-x") || open).focus(); });
+          tile.appendChild(im); tile.appendChild(x); row.appendChild(tile);
+        });
+        if (busy) row.appendChild(mk("div", "bf-photo is-busy", "…"));
+        else if (n > 0 && n < PHOTO_MAX) {
+          var add = mk("button", "bf-photo bf-photo-add", "+");
+          add.type = "button"; add.setAttribute("aria-label", "Lägg till en bild till");
+          add.addEventListener("click", pick);
+          row.appendChild(add);
+        }
+      }
+      open.addEventListener("click", pick);
+      input.addEventListener("change", function () {
+        var files = Array.prototype.slice.call(input.files || []);
+        input.value = "";
+        if (!files.length) return;
+        var room = PHOTO_MAX - state.photos.length;
+        perr.textContent = files.length > room ? "Högst " + PHOTO_MAX + " bilder, så bara " + (room === 1 ? "den första" : "de " + room + " första") + " togs med." : "";
+        files = files.slice(0, Math.max(0, room));
+        busy = true; draw();
+        var mine = state;
+        files.reduce(function (p, f) {
+          return p.then(function () {
+            return photoFromFile(f).then(function (photo) { if (state === mine && state.photos.length < PHOTO_MAX) state.photos.push(photo); },
+              function (msg) { perr.textContent = typeof msg === "string" ? msg : "Bilden kunde inte läsas. Välj en annan bild."; });
+          });
+        }, Promise.resolve()).then(function () { busy = false; if (state === mine) draw(); });
+      });
+      wrap.appendChild(input); wrap.appendChild(open); wrap.appendChild(label); wrap.appendChild(row); wrap.appendChild(hint); wrap.appendChild(perr);
+      draw();
+      return wrap;
+    }
     function field(label, input) {
       var f = mk("div", "bd-field");
       var l = mk("label", null, label);
@@ -2368,6 +2464,7 @@
       msgOpen.hidden = !msgField.hidden;
       form.appendChild(msgOpen);
       form.appendChild(msgField);
+      form.appendChild(photoPicker());
       // Enter in a field books, like the button (a hidden submit button makes the phone's keyboard offer "Klar/Gå")
       var hiddenSubmit = mk("button"); hiddenSubmit.type = "submit"; hiddenSubmit.hidden = true; form.appendChild(hiddenSubmit);
       var err = mk("p", "bd-error");
@@ -2434,6 +2531,7 @@
             customerPhone: phone.value(),
             customerEmail: state.contact.email,
             customerNote: noteParts.join("\n") || undefined,
+            photos: state.photos.length ? state.photos.map(function (p) { return p.b64; }) : undefined,
           }),
         })
           .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
@@ -2516,7 +2614,7 @@
       var group = service.variants && service.variants.length > 1 ? service : null;
       var first = group ? group.variants[0] : service;
       var profile = useHairStep ? profileFor(first.name) : { questions: [] };
-      state = { group: group, service: group ? { name: group.name, durationMinutes: null, priceLabel: group.priceLabel || "" } : service, variantPicked: !group, profile: profile, answers: {}, staff: null, slot: null, dayStr: null, notice: "", weekOffset: 0, weekPicked: false, contact: state && state.contact ? state.contact : null };
+      state = { group: group, service: group ? { name: group.name, durationMinutes: null, priceLabel: group.priceLabel || "" } : service, variantPicked: !group, profile: profile, answers: {}, staff: null, slot: null, dayStr: null, notice: "", weekOffset: 0, weekPicked: false, contact: state && state.contact ? state.contact : null, photos: [] };
       steps = stepsFor(profile, !!group);
       popup.classList.add("is-open");
       var opened = state;
